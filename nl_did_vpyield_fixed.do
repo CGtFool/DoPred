@@ -154,27 +154,33 @@ summarize VPYield Maturity Post Treated DiD TrueYield
 capture program drop nl_dld_fe
 program define nl_dld_fe, rclass
     version 17.0
-    args lnf depvar Maturity Post Treated DiD ///
-        b1Cb b2Cb b3Cb b1Ca b2Ca b3Ca b1Tb b2Tb b3Tb b1Ta b2Ta b3Ta L
+    syntax varlist(min=5 max=5)
+    tokenize `varlist'
+    local dep    `1'
+    local matur  `2'
+    local post   `3'
+    local treat  `4'
+    local did    `5'
 
-    tempvar touse term1 term2 f_it resid alpha gamma alpha_old gamma_old tmp tmp2 modelval ///
+    tempvar touse dep_orig term1 term2 f_it resid alpha gamma alpha_old gamma_old tmp tmp2 modelval ///
         cmean mmean cmean2 chg
-    gen byte `touse' = !missing(`depvar', ``Maturity'', ``Post'', ``Treated'', ``DiD'')
+    gen byte `touse' = !missing(`dep', `matur', `post', `treat', `did')
+    gen double `dep_orig' = `dep' if `touse'
 
     gen double `term1' = .
-    replace `term1' = ((1 - exp(-`L'*``Maturity'')) / (`L'*``Maturity'')) if `touse' & `L'!=0 & ``Maturity''>0
-    replace `term1' = 1 if `touse' & (`L'==0 | ``Maturity''==0)
+    replace `term1' = ((1 - exp(-{L}*`matur')) / ({L}*`matur')) if `touse' & {L}!=0 & `matur'>0
+    replace `term1' = 1 if `touse' & ({L}==0 | `matur'==0)
 
     gen double `term2' = .
-    replace `term2' = (`term1' - exp(-`L'*``Maturity'')) if `touse'
+    replace `term2' = (`term1' - exp(-{L}*`matur')) if `touse'
 
     gen double `f_it' = ///
-        (`b1Cb') + (`b2Cb')*`term1' + (`b3Cb')*`term2' + ///
-        (`b1Ca')*``Post'' + (`b2Ca')*``Post''*`term1' + (`b3Ca')*``Post''*`term2' + ///
-        (`b1Tb')*``Treated'' + (`b2Tb')*``Treated''*`term1' + (`b3Tb')*``Treated''*`term2' + ///
-        (`b1Ta')*``DiD'' + (`b2Ta')*``DiD''*`term1' + (`b3Ta')*``DiD''*`term2'
+        ({b1Cb}) + ({b2Cb})*`term1' + ({b3Cb})*`term2' + ///
+        ({b1Ca})*`post' + ({b2Ca})*`post'*`term1' + ({b3Ca})*`post'*`term2' + ///
+        ({b1Tb})*`treat' + ({b2Tb})*`treat'*`term1' + ({b3Tb})*`treat'*`term2' + ///
+        ({b1Ta})*`did' + ({b2Ta})*`did'*`term1' + ({b3Ta})*`did'*`term2'
 
-    gen double `resid' = ``depvar'' - `f_it' if `touse'
+    gen double `resid' = `dep_orig' - `f_it' if `touse'
     gen double `alpha' = 0 if `touse'
     gen double `gamma' = 0 if `touse'
     bysort CompanyCode: egen double `cmean' = mean(`resid') if `touse'
@@ -219,8 +225,7 @@ program define nl_dld_fe, rclass
     }
 
     gen double `modelval' = `f_it' + `alpha' + `gamma' if `touse'
-    replace `lnf' = ``depvar'' - `modelval' if `touse'
-    replace `lnf' = . if !`touse'
+    replace `dep' = `modelval' if `touse'
 
     return scalar nl_fe_altern_iters = `iter'
 end
