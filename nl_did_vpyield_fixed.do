@@ -236,8 +236,8 @@ program list nl_dld_fe
 nl nl_dld_fe @ VPYield Maturity Post Treated DiD, ///
     parameters(b1Cb b2Cb b3Cb b1Ca b2Ca b3Ca b1Tb b2Tb b3Tb b1Ta b2Ta b3Ta L) ///
     iterate(10000) ///
-    initial(b1Cb = .01 b2Cb = .01 b3Cb = .01 b1Ca = 0 b2Ca = 0 b3Ca = 0 ///
-            b1Tb = 0 b2Tb = 0 b3Tb = 0 b1Ta = 0 b2Ta = 0 b3Ta = 0 L = 1) ///
+    initial(b1Cb .01 b2Cb .01 b3Cb .01 b1Ca 0 b2Ca 0 b3Ca 0 ///
+            b1Tb 0 b2Tb 0 b3Tb 0 b1Ta 0 b2Ta 0 b3Ta 0 L 1) ///
     vce(cluster CompanyCode)
 
 estimates store nl_regression
