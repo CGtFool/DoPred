@@ -219,7 +219,7 @@ program define nl_dld_fe, rclass
     }
 
     gen double `modelval' = `f_it' + `alpha' + `gamma' if `touse'
-    replace `lnf' = `dep' - `modelval' if `touse'
+    replace `lnf' = ``depvar'' - `modelval' if `touse'
     replace `lnf' = . if !`touse'
 
     return scalar nl_fe_altern_iters = `iter'
