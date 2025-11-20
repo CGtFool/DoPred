@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
 Python translation of the Stata do-file `nl_did_vpyield_fixed.do`.
+中文概要：
+- 本脚本重现 Stata do-file 的完整处理流程，用 Python 实现数据清洗、DiD 变量生成、非线性 Diebold-Li 模型估计以及结果输出。
 
-Workflow summary:
+Workflow summary 工作流摘要：
 1. Read the CSV exported from the bond return data pull.
+   读取债券收益率导出的 CSV。
 2. Coerce date and numeric columns to the correct dtypes.
+   将日期/数值字段转换成适当的数据类型。
 3. Generate treatment/Post/DiD indicators inside a ±90 day window around 2025-06-18.
+   在政策窗口内生成 Treated、Post、DiD 指示变量。
 4. Keep BdType ∈ {13, 14, 19}.
+   仅保留指定债券类型。
 5. Estimate a Diebold-Li style nonlinear model with company & month fixed effects,
    solved via alternating projections within each nonlinear least squares iteration.
+   在每次非线性最小二乘迭代中交替剥离公司与月份固定效应，拟合 Diebold-Li 模型。
 6. Output parameter estimates, predicted values, a scatter plot, marginal effects,
    and a Stata-compatible `.dta` snapshot for downstream checks.
+   输出系数表、预测值、散点图、边际效应以及 .dta 备份。
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from numpy.typing import NDArray
 from scipy.optimize import least_squares
 
 
+# 参数名称顺序列表，方便后续在数组中按名称定位（与 Stata `parameters()` 顺序一致）
 PARAM_ORDER: List[str] = [
     "b1Cb",
     "b2Cb",
@@ -47,6 +56,7 @@ PARAM_ORDER: List[str] = [
 
 
 def positive_float(value: str) -> float:
+    """确保 CLI 输入的浮点数为正数，避免无效的 L 初值或窗口设置。"""
     parsed = float(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("Expected a positive float.")
@@ -54,6 +64,7 @@ def positive_float(value: str) -> float:
 
 
 def parse_args() -> argparse.Namespace:
+    """集中定义所有命令行参数，保持与 Stata do-file 参数一致并新增调试开关。"""
     parser = argparse.ArgumentParser(
         description="Nonlinear Diebold-Li FE estimator (Python port of the Stata do-file)."
     )
@@ -127,6 +138,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_logging(verbose: bool) -> None:
+    """根据 verbose 选择日志级别，保证批量运行时也能记录关键步骤。"""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -136,6 +148,7 @@ def setup_logging(verbose: bool) -> None:
 
 
 def read_csv(path: Path) -> pd.DataFrame:
+    """读取原始 CSV 并输出形状，用于快速确认输入数据量。"""
     logging.info("Reading CSV: %s", path)
     df = pd.read_csv(path)
     logging.debug("Raw shape: %s", df.shape)
@@ -143,6 +156,7 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 
 def coerce_date_column(df: pd.DataFrame, column: str) -> None:
+    """把指定列转换为日期；缺失列时仅提示，不终止流程。"""
     if column not in df.columns:
         logging.info("Date column `%s` not found; skipping.", column)
         return
@@ -155,6 +169,7 @@ def coerce_date_column(df: pd.DataFrame, column: str) -> None:
 
 
 def coerce_numeric_column(df: pd.DataFrame, column: str) -> None:
+    """将字符串数字安全转换为浮点，便于后续矩阵计算。"""
     if column not in df.columns:
         logging.warning("Numeric column `%s` not found.", column)
         return
@@ -167,6 +182,7 @@ def coerce_numeric_column(df: pd.DataFrame, column: str) -> None:
 
 
 def normalize_kcbz(df: pd.DataFrame) -> None:
+    """将 kcbz 字段统一转换为 0/1 dummy，并创建 Treated 变量。"""
     col = "kcbz"
     if col not in df.columns:
         logging.error("`kcbz` not found; defaulting Treated to 0.")
@@ -198,6 +214,7 @@ def normalize_kcbz(df: pd.DataFrame) -> None:
 
 
 def ensure_end_date(df: pd.DataFrame) -> None:
+    """确保存在 EndDt 列，否则回退到 ValueDt 或 IssDt。"""
     if "EndDt" in df.columns:
         return
     for candidate in ("ValueDt", "IssDt"):
@@ -209,6 +226,7 @@ def ensure_end_date(df: pd.DataFrame) -> None:
 
 
 def filter_bdtype(df: pd.DataFrame) -> pd.DataFrame:
+    """筛选 BdType ∈ {13,14,19}，与 Stata keep 逻辑一致。"""
     if "BdType" not in df.columns:
         raise ValueError("BdType not found. Required for filtering.")
     numeric = pd.to_numeric(df["BdType"], errors="coerce")
@@ -227,6 +245,7 @@ def filter_bdtype(df: pd.DataFrame) -> pd.DataFrame:
 def assign_time_window(
     df: pd.DataFrame, key_date: pd.Timestamp, window_days: int
 ) -> pd.DataFrame:
+    """生成时间窗口样本、Post、DiD 变量，完全对齐 Stata 中的逻辑。"""
     if "EndDt" not in df.columns:
         raise ValueError("EndDt is required before time window filtering.")
 
@@ -249,6 +268,7 @@ def assign_time_window(
 
 
 def ensure_company_code(df: pd.DataFrame) -> None:
+    """确认 CompanyCode 存在并转为字符串，避免 merge/panel 歧义。"""
     if "CompanyCode" not in df.columns:
         raise ValueError("CompanyCode not found; needed for firm FE.")
     df["CompanyCode"] = df["CompanyCode"].astype(str)
@@ -257,19 +277,24 @@ def ensure_company_code(df: pd.DataFrame) -> None:
 def prepare_dataframe(
     csv_path: Path, key_date: pd.Timestamp, window_days: int
 ) -> pd.DataFrame:
+    """按 Stata 步骤顺序完成所有清洗、筛选、指示变量生成。"""
     df = read_csv(csv_path)
 
+    # 1) 日期列：尝试转换 EndDt/ValueDt/MatDt
     for dcol in ("EndDt", "ValueDt", "MatDt"):
         if dcol in df.columns:
             coerce_date_column(df, dcol)
     ensure_end_date(df)
     df["EndDt_month"] = df["EndDt"].dt.year * 100 + df["EndDt"].dt.month
 
+    # 2) 数值列：收益率、TrueYield、久期
     for vcol in ("VPYield", "Maturity", "TrueYield"):
         coerce_numeric_column(df, vcol)
 
+    # 3) 处理组 dummy、公司识别
     normalize_kcbz(df)
     ensure_company_code(df)
+    # 4) 债券类型筛选 + 时间窗口 + 有效观测
     df = filter_bdtype(df)
     df = assign_time_window(df, key_date, window_days)
     df = df[df["Maturity"].notna() & df["Maturity"].gt(0)]
@@ -294,6 +319,7 @@ def prepare_dataframe(
 
 
 def describe_data(df: pd.DataFrame) -> None:
+    """输出关键变量的描述统计，便于和 Stata summarize 对照。"""
     cols = ["VPYield", "Maturity", "Post", "Treated", "DiD"]
     available = [c for c in cols if c in df.columns]
     if not available:
@@ -303,6 +329,7 @@ def describe_data(df: pd.DataFrame) -> None:
 
 
 def _group_mean(values: NDArray[np.float64], groups: NDArray[np.int64], n_groups: int) -> NDArray[np.float64]:
+    """使用 np.bincount 计算分组均值，复刻 bysort egen mean 的效果。"""
     sums = np.bincount(groups, weights=values, minlength=n_groups)
     counts = np.bincount(groups, minlength=n_groups)
     means = np.divide(
@@ -324,6 +351,7 @@ def alternating_fe(
     maxiter: int,
     tol: float,
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64], int]:
+    """迭代在公司/月份之间交替平滑固定效应，直到收敛或达到上限。"""
     alpha = np.zeros(n_companies, dtype=np.float64)
     gamma = np.zeros(n_months, dtype=np.float64)
 
@@ -331,9 +359,11 @@ def alternating_fe(
         alpha_old = alpha.copy()
         gamma_old = gamma.copy()
 
+        # Step A: 固定公司效应，利用月份均值更新月份效应 gamma
         tmp = resid - alpha[company_idx]
         gamma = _group_mean(tmp, month_idx, n_months)
 
+        # Step B: 固定最新月份效应，按公司均值更新 alpha
         tmp2 = resid - gamma[month_idx]
         alpha = _group_mean(tmp2, company_idx, n_companies)
 
@@ -357,6 +387,7 @@ def alternating_fe(
 
 
 class DieboldLiFEModel:
+    """封装 Diebold-Li 结构项与公司/月度固定效应求解，便于 SciPy 调用。"""
     def __init__(
         self,
         df: pd.DataFrame,
@@ -364,6 +395,7 @@ class DieboldLiFEModel:
         max_fe_iters: int,
         fe_tol: float,
     ) -> None:
+        """准备模型所需的 numpy 缓存和索引，加速后续迭代。"""
         self.df = df.copy()
         self.y = df["VPYield"].to_numpy(dtype=np.float64)
         self.maturity = df["Maturity"].to_numpy(dtype=np.float64)
@@ -390,6 +422,7 @@ class DieboldLiFEModel:
 
     @staticmethod
     def _terms(maturity: NDArray[np.float64], L: float) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """计算 Diebold-Li 中的两个基函数 term1/term2，并对 L→0 做数值保护。"""
         safe_L = np.clip(L, 1e-10, None)
         denom = safe_L * maturity
         term1 = np.ones_like(maturity)
@@ -401,6 +434,7 @@ class DieboldLiFEModel:
     def structural_component(
         self, params: NDArray[np.float64]
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """根据参数向量生成结构部分拟合值，并缓存 term1/term2。"""
         (
             b1Cb,
             b2Cb,
@@ -419,6 +453,7 @@ class DieboldLiFEModel:
 
         term1, term2 = self._terms(self.maturity, L)
 
+        # 结构项：依次包含基准载荷（Cb）、Post 载荷（Ca）、Treat 载荷（Tb）、DiD 载荷（Ta）
         fitted = (
             b1Cb
             + b2Cb * term1
@@ -438,6 +473,7 @@ class DieboldLiFEModel:
         return fitted, term1, term2
 
     def residuals(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
+        """供 least_squares 调用：先算结构项，再交替剥离固定效应，返回残差。"""
         fitted, _, _ = self.structural_component(params)
         resid = self.y - fitted
         alpha, gamma, iters = alternating_fe(
@@ -457,12 +493,14 @@ class DieboldLiFEModel:
         return final_resid
 
     def predict(self, params: NDArray[np.float64]) -> NDArray[np.float64]:
+        """在估计完成后返回含 FE 的总体预测值，用于作图/导出。"""
         fitted, _, _ = self.structural_component(params)
         alpha_obs = self.latest_alpha[self.company_idx]
         gamma_obs = self.latest_gamma[self.month_idx]
         return fitted + alpha_obs + gamma_obs
 
     def margins_did(self, params: NDArray[np.float64], maturities: Iterable[float]) -> pd.DataFrame:
+        """计算不同期限下 DiD 的边际效应，对应 Stata margins, dydx(DiD)。"""
         maturities = np.asarray(list(maturities), dtype=np.float64)
         L = params[-1]
         term1, term2 = self._terms(maturities, L)
@@ -489,6 +527,8 @@ def run_nl_regression(
     max_nl_steps: int,
     verbose: bool,
 ) -> Tuple[np.ndarray, least_squares]:
+    """调用 SciPy 最小二乘以 Stata 的初值为起点估计全部参数。"""
+    # 与 Stata initial() 一致的初值（除 L 由 CLI 控制）
     initial_guess = np.array(
         [
             0.01,  # b1Cb
@@ -508,6 +548,7 @@ def run_nl_regression(
         dtype=np.float64,
     )
 
+    # L 需要保持正值，其他参数允许正负
     lower_bounds = np.array([-np.inf] * (len(PARAM_ORDER) - 1) + [1e-10])
     upper_bounds = np.array([np.inf] * len(PARAM_ORDER))
 
@@ -526,6 +567,7 @@ def run_nl_regression(
 
 
 def summarize_results(model: DieboldLiFEModel, params: NDArray[np.float64], lsq: least_squares) -> pd.DataFrame:
+    """计算 SSE/R²/标准误并生成结果表，方便与 Stata estimates table 对照。"""
     residuals = lsq.fun
     n_obs = residuals.size
     dof = max(n_obs - len(params), 1)
@@ -566,6 +608,7 @@ def save_outputs(
     scatter_filename: str,
     export_dta: bool,
 ) -> None:
+    """将估计输出写入 CSV/Parquet/图像/可选 Stata dta，复用输出目录。"""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     params_path = output_dir / "nl_regression_results.csv"
@@ -599,6 +642,7 @@ def save_outputs(
 
 
 def main() -> None:
+    """脚本入口：解析参数、准备数据、估计、保存并写 summary JSON。"""
     args = parse_args()
     setup_logging(args.verbose)
 
