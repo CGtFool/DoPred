@@ -35,6 +35,7 @@ import pandas as pd
 import seaborn as sns
 from numpy.typing import NDArray
 from scipy.optimize import least_squares
+from scipy.stats import t as student_t
 
 
 # 参数名称顺序列表，方便后续在数组中按名称定位（与 Stata `parameters()` 顺序一致）
@@ -604,12 +605,14 @@ def summarize_results(model: DieboldLiFEModel, params: NDArray[np.float64], lsq:
 
     stderr = np.sqrt(np.diag(cov))
     t_values = params / stderr
+    p_values = 2 * student_t.sf(np.abs(t_values), dof)
     results = pd.DataFrame(
         {
             "param": PARAM_ORDER,
             "estimate": params,
             "std_err": stderr,
             "t_value": t_values,
+            "p_value": p_values,
         }
     )
     logging.info("R-squared: %.4f, SSE: %.4f, observations: %d", r2, sse, n_obs)
