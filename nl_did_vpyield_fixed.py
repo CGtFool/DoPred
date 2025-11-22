@@ -55,6 +55,25 @@ PARAM_ORDER: List[str] = [
 ]
 
 
+def safe_to_parquet(df: pd.DataFrame, path: Path) -> Path:
+    """
+    优先写入 Parquet；若环境缺少 pyarrow/fastparquet，则降级为 CSV 并记录警告。
+    返回实际写入的文件路径，便于日志提示。
+    """
+    try:
+        df.to_parquet(path, index=False)
+        return path
+    except (ImportError, ModuleNotFoundError) as exc:
+        fallback_path = path.with_suffix(".csv")
+        logging.warning(
+            "Parquet engine unavailable (%s); falling back to CSV: %s",
+            exc,
+            fallback_path,
+        )
+        df.to_csv(fallback_path, index=False)
+        return fallback_path
+
+
 def positive_float(value: str) -> float:
     """确保 CLI 输入的浮点数为正数，避免无效的 L 初值或窗口设置。"""
     parsed = float(value)
@@ -620,8 +639,8 @@ def save_outputs(
     logging.info("Saved margins table to %s", margins_path)
 
     data_path = output_dir / "did_analysis_data2.parquet"
-    df.to_parquet(data_path, index=False)
-    logging.info("Saved processed dataset (parquet) to %s", data_path)
+    actual_data_path = safe_to_parquet(df, data_path)
+    logging.info("Saved processed dataset to %s", actual_data_path)
 
     if export_dta:
         dta_path = output_dir / "did_analysis_data2.dta"

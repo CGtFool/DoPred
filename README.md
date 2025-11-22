@@ -9,6 +9,7 @@
    ```bash
    pip install pandas numpy scipy matplotlib seaborn pyarrow
    ```
+   若无法立即安装 `pyarrow`/`fastparquet`，脚本与 notebook 会在写 Parquet 失败时自动退回 CSV（同时打印警告），但仍建议安装以获得更高效的二进制输出。
 
 2. Run the estimator (replace the CSV path with your own export):
 
