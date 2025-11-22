@@ -319,6 +319,7 @@ def prepare_dataframe(
     df = assign_time_window(df, key_date, window_days)
     df = df[df["Maturity"].notna() & df["Maturity"].gt(0)]
     df = df[df["VPYield"].notna()]
+    df = df[df["VPYield"] <= 20]
     df = df[df["EndDt_month"].notna()]
 
     # Drop rows with missing inputs used by the evaluator.
