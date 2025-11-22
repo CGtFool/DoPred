@@ -647,7 +647,7 @@ def save_outputs(
 
     if export_dta:
         dta_path = output_dir / "did_analysis_data2.dta"
-        df.to_stata(dta_path, write_index=False)
+        df.to_stata(dta_path, write_index=False, version=118)
         logging.info("Saved processed dataset to %s", dta_path)
 
     if "y_hat" in df.columns:

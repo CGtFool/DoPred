@@ -28,7 +28,7 @@ Key arguments mirror the original Stata script:
 - `--max-nl-steps` controls the SciPy `least_squares` iterations (default 10,000 evaluations).
 - `--initial-L` sets the starting value for the Diebold-Li decay parameter (default 1.0).
 
-Outputs go to `--output-dir` (CSV of coefficients, margins table, parquet snapshot, optional `.dta`, scatter plot, and JSON summary).
+Outputs go to `--output-dir` (CSV of coefficients, margins table, parquet snapshot, optional `.dta`, scatter plot, and JSON summary). 写 `.dta` 时默认使用 Stata 118 版本（UTF-8），可避免含中文字段时的 `latin-1` 编码报错。
 
 ### Notebook usage
 
