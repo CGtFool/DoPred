@@ -520,25 +520,59 @@ class DieboldLiFEModel:
         gamma_obs = self.latest_gamma[self.month_idx]
         return fitted + alpha_obs + gamma_obs
 
-    def margins_did(self, params: NDArray[np.float64], maturities: Iterable[float]) -> pd.DataFrame:
-        """计算不同期限下 DiD 的边际效应，对应 Stata margins, dydx(DiD)。"""
+    def margins_did(
+        self,
+        params: NDArray[np.float64],
+        maturities: Iterable[float],
+        cov: NDArray[np.float64],
+        dof: int,
+    ) -> pd.DataFrame:
+        """计算不同期限下 DiD 的边际效应，附带 t 检验与 p 值，并在控制台打印。"""
         maturities = np.asarray(list(maturities), dtype=np.float64)
-        L = params[-1]
-        term1, term2 = self._terms(maturities, L)
+        term1, term2 = self._terms(maturities, params[-1])
 
-        b1Ta = params[PARAM_ORDER.index("b1Ta")]
-        b2Ta = params[PARAM_ORDER.index("b2Ta")]
-        b3Ta = params[PARAM_ORDER.index("b3Ta")]
+        idx = [PARAM_ORDER.index(name) for name in ("b1Ta", "b2Ta", "b3Ta")]
+        beta = params[idx]
+        cov_sub = cov[np.ix_(idx, idx)]
 
-        effect = b1Ta + b2Ta * term1 + b3Ta * term2
-        return pd.DataFrame(
+        weights = np.column_stack((np.ones_like(maturities), term1, term2))
+        effects = weights @ beta
+        variances = np.einsum("ij,jk,ik->i", weights, cov_sub, weights)
+        std_err = np.sqrt(np.maximum(variances, 0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_values = np.divide(effects, std_err, out=np.zeros_like(effects), where=std_err > 0)
+        p_values = 2 * student_t.sf(np.abs(t_values), dof)
+
+        crit = student_t.ppf(0.975, dof)
+        ci_low = effects - crit * std_err
+        ci_high = effects + crit * std_err
+
+        margins_df = pd.DataFrame(
             {
                 "Maturity": maturities,
                 "term1": term1,
                 "term2": term2,
-                "dydx_DiD": effect,
+                "dydx_DiD": effects,
+                "std_err": std_err,
+                "t_value": t_values,
+                "p_value": p_values,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
             }
         )
+
+        print("\nDiD marginal effects with t-tests")
+        print("-" * 86)
+        print(f"{'Maturity':>10} | {'Effect':>10}  {'Std. Err.':>10}  {'t':>7}  {'P>|t|':>7}     [95% conf. interval]")
+        print("-" * 86)
+        for row in margins_df.itertuples(index=False):
+            print(
+                f"{row.Maturity:10.2f} | {row.dydx_DiD:10.6f}  {row.std_err:10.6f}  "
+                f"{row.t_value:7.2f}  {row.p_value:7.3f}     {row.ci_low:10.6f}  {row.ci_high:10.6f}"
+            )
+        print("-" * 86)
+
+        return margins_df
 
 
 def run_nl_regression(
@@ -547,7 +581,7 @@ def run_nl_regression(
     initial_L: float,
     max_nl_steps: int,
     verbose: bool,
-) -> Tuple[np.ndarray, least_squares]:
+) -> Tuple[np.ndarray, least_squares, List[float]]:
     """调用 SciPy 最小二乘以 Stata 的初值为起点估计全部参数。"""
     # 与 Stata initial() 一致的初值（除 L 由 CLI 控制）
     initial_guess = np.array(
@@ -573,21 +607,40 @@ def run_nl_regression(
     lower_bounds = np.array([-np.inf] * (len(PARAM_ORDER) - 1) + [1e-10])
     upper_bounds = np.array([np.inf] * len(PARAM_ORDER))
 
+    # 记录每次迭代的残差平方和 (SSE)
+    iteration_history: List[float] = []
+    initial_resid = model.residuals(initial_guess)
+    iteration_history.append(float(np.sum(initial_resid**2)))
+
+    def _callback(*args) -> None:
+        """兼容不同 SciPy 版本的回调接口，记录 SSE 轨迹。"""
+        if len(args) == 3:
+            _, cost, _ = args
+            sse = float(2 * cost)
+        else:
+            params_current = args[0]
+            resid = model.residuals(params_current)
+            sse = float(np.sum(resid**2))
+        iteration_history.append(sse)
+
     lsq = least_squares(
         model.residuals,
         initial_guess,
         bounds=(lower_bounds, upper_bounds),
         max_nfev=max_nl_steps,
-        verbose=2 if verbose else 0,
+        verbose=0,
+        callback=_callback,
     )
     if not lsq.success:
         logging.warning("Least squares did not converge: %s", lsq.message)
 
     params = lsq.x
-    return params, lsq
+    return params, lsq, iteration_history
 
 
-def summarize_results(model: DieboldLiFEModel, params: NDArray[np.float64], lsq: least_squares) -> pd.DataFrame:
+def summarize_results(
+    model: DieboldLiFEModel, params: NDArray[np.float64], lsq: least_squares
+) -> Tuple[pd.DataFrame, Dict[str, float], NDArray[np.float64]]:
     """计算 SSE/R²/标准误并生成结果表，方便与 Stata estimates table 对照。"""
     residuals = lsq.fun
     n_obs = residuals.size
@@ -607,6 +660,9 @@ def summarize_results(model: DieboldLiFEModel, params: NDArray[np.float64], lsq:
     stderr = np.sqrt(np.diag(cov))
     t_values = params / stderr
     p_values = 2 * student_t.sf(np.abs(t_values), dof)
+    crit = student_t.ppf(0.975, dof)
+    ci_low = params - crit * stderr
+    ci_high = params + crit * stderr
     results = pd.DataFrame(
         {
             "param": PARAM_ORDER,
@@ -614,12 +670,22 @@ def summarize_results(model: DieboldLiFEModel, params: NDArray[np.float64], lsq:
             "std_err": stderr,
             "t_value": t_values,
             "p_value": p_values,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
         }
     )
-    logging.info("R-squared: %.4f, SSE: %.4f, observations: %d", r2, sse, n_obs)
-    logging.info("Last FE iterations: %d", model.last_fe_iterations)
-    logging.info("Parameter estimates:\n%s", results.to_string(index=False, float_format="%.6f"))
-    return results.assign(r2=r2, sse=sse, n_obs=n_obs)
+    adj_r2 = 1 - (1 - r2) * (n_obs - 1) / max(n_obs - len(params), 1)
+    stats = {
+        "r2": r2,
+        "adj_r2": adj_r2,
+        "root_mse": np.sqrt(mse),
+        "res_dev": -2 * lsq.cost,
+        "n_obs": n_obs,
+        "sse": sse,
+        "mse": mse,
+        "dof": dof,
+    }
+    return results, stats, cov
 
 
 def save_outputs(
@@ -664,6 +730,40 @@ def save_outputs(
         logging.info("Saved scatter plot to %s", scatter_path)
 
 
+def print_iteration_history(history: List[float]) -> None:
+    """按照指定格式打印每次迭代的残差平方和。"""
+    print()
+    for idx, value in enumerate(history):
+        label = f"Iteration {idx}:"
+        print(f"{label:<12} Residual SS = {value:11.5f}")
+    print()
+
+
+def print_regression_summary(stats: Dict[str, float], results: pd.DataFrame) -> None:
+    """以 Stata 风格输出回归概览与系数表。"""
+    print(
+        f"Nonlinear regression".ljust(52)
+        + f"Number of obs = {stats['n_obs']:>10,.0f}"
+    )
+    print("".ljust(52) + f"R-squared     = {stats['r2']:>10.4f}")
+    print("".ljust(52) + f"Adj R-squared = {stats['adj_r2']:>10.4f}")
+    print("".ljust(52) + f"Root MSE      = {stats['root_mse']:>10.6f}")
+    print("".ljust(52) + f"Res. dev.     = {stats['res_dev']:>10.3f}")
+
+    print("\n" + "-" * 78)
+    print(
+        f"{'Param':>12} | {'Coefficient':>11}  {'Std. Err.':>10}  {'t':>7}  {'P>|t|':>7}     [95% conf. interval]"
+    )
+    print("-" * 78)
+    for row in results.itertuples(index=False):
+        name = f"/{row.param}"
+        print(
+            f"{name:>12} | {row.estimate:11.6f}  {row.std_err:10.6f}  "
+            f"{row.t_value:7.2f}  {row.p_value:7.3f}     {row.ci_low:10.6f}  {row.ci_high:10.6f}"
+        )
+    print("-" * 78 + "\n")
+
+
 def main() -> None:
     """脚本入口：解析参数、准备数据、估计、保存并写 summary JSON。"""
     args = parse_args()
@@ -678,21 +778,22 @@ def main() -> None:
         fe_tol=args.fe_tol,
     )
 
-    params, lsq = run_nl_regression(
+    params, lsq, iteration_history = run_nl_regression(
         model,
         initial_L=args.initial_L,
         max_nl_steps=args.max_nl_steps,
         verbose=args.verbose,
     )
+    print_iteration_history(iteration_history)
 
     y_hat = model.predict(params)
     df = df.copy()
     df["y_hat"] = y_hat
 
     maturities = [0.25, 0.5, 1, 2, 3, 5, 10, 15]
-    margins = model.margins_did(params, maturities)
-
-    params_df = summarize_results(model, params, lsq)
+    params_df, stats, cov = summarize_results(model, params, lsq)
+    print_regression_summary(stats, params_df)
+    margins = model.margins_did(params, maturities, cov, int(stats["dof"]))
     save_outputs(
         df,
         params_df,
@@ -709,6 +810,7 @@ def main() -> None:
         "optimizer_success": bool(lsq.success),
         "optimizer_message": lsq.message,
         "fe_iterations": model.last_fe_iterations,
+        "stats": stats,
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
