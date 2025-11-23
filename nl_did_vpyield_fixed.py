@@ -607,38 +607,21 @@ def run_nl_regression(
     lower_bounds = np.array([-np.inf] * (len(PARAM_ORDER) - 1) + [1e-10])
     upper_bounds = np.array([np.inf] * len(PARAM_ORDER))
 
-    # 记录每次迭代的残差平方和 (SSE)
+    # 记录每次残差评估的 SSE（含初始点）
     iteration_history: List[float] = []
-    initial_resid = model.residuals(initial_guess)
-    iteration_history.append(float(np.sum(initial_resid**2)))
 
-    def _callback(*args) -> None:
-        """兼容不同 SciPy 版本的回调接口，记录 SSE 轨迹。"""
-        if len(args) == 3:
-            _, cost, _ = args
-            sse = float(2 * cost)
-        else:
-            params_current = args[0]
-            resid = model.residuals(params_current)
-            sse = float(np.sum(resid**2))
-        iteration_history.append(sse)
+    def tracked_residuals(params: NDArray[np.float64]) -> NDArray[np.float64]:
+        resid = model.residuals(params)
+        iteration_history.append(float(np.sum(resid**2)))
+        return resid
 
-    lsq_kwargs = dict(
-        fun=model.residuals,
-        x0=initial_guess,
+    lsq = least_squares(
+        tracked_residuals,
+        initial_guess,
         bounds=(lower_bounds, upper_bounds),
         max_nfev=max_nl_steps,
         verbose=2 if verbose else 0,
     )
-
-    try:
-        lsq = least_squares(**lsq_kwargs, callback=_callback)
-    except TypeError as exc:
-        if "callback" not in str(exc):
-            raise
-        logging.info("SciPy least_squares callback unsupported; falling back without intermediate tracking.")
-        lsq = least_squares(**lsq_kwargs)
-        iteration_history.append(float(2 * lsq.cost))
     if not lsq.success:
         logging.warning("Least squares did not converge: %s", lsq.message)
 
@@ -652,7 +635,9 @@ def summarize_results(
     """计算 SSE/R²/标准误并生成结果表，方便与 Stata estimates table 对照。"""
     residuals = lsq.fun
     n_obs = residuals.size
-    dof = max(n_obs - len(params), 1)
+    param_count = len(params)
+    fe_param_count = model.n_companies + model.n_months - 1
+    dof = max(n_obs - (param_count + fe_param_count), 1)
     sse = np.sum(residuals**2)
     mse = sse / dof
     y = model.y
@@ -682,7 +667,8 @@ def summarize_results(
             "ci_high": ci_high,
         }
     )
-    adj_r2 = 1 - (1 - r2) * (n_obs - 1) / max(n_obs - len(params), 1)
+    effective_params = param_count + fe_param_count
+    adj_r2 = 1 - (1 - r2) * (n_obs - 1) / max(n_obs - effective_params, 1)
     stats = {
         "r2": r2,
         "adj_r2": adj_r2,
@@ -691,6 +677,8 @@ def summarize_results(
         "sse": sse,
         "mse": mse,
         "dof": dof,
+        "param_count": param_count,
+        "fe_params": fe_param_count,
     }
     return results, stats, cov
 
@@ -755,6 +743,7 @@ def print_regression_summary(stats: Dict[str, float], results: pd.DataFrame) -> 
     print("".ljust(52) + f"R-squared     = {stats['r2']:>10.4f}")
     print("".ljust(52) + f"Adj R-squared = {stats['adj_r2']:>10.4f}")
     print("".ljust(52) + f"Root MSE      = {stats['root_mse']:>10.6f}")
+    print("".ljust(52) + f"FE params     = {stats['fe_params']:>10,.0f}")
 
     print("\n" + "-" * 78)
     print(
