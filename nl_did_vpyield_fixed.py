@@ -687,7 +687,6 @@ def summarize_results(
         "r2": r2,
         "adj_r2": adj_r2,
         "root_mse": np.sqrt(mse),
-        "res_dev": -2 * lsq.cost,
         "n_obs": n_obs,
         "sse": sse,
         "mse": mse,
@@ -756,7 +755,6 @@ def print_regression_summary(stats: Dict[str, float], results: pd.DataFrame) -> 
     print("".ljust(52) + f"R-squared     = {stats['r2']:>10.4f}")
     print("".ljust(52) + f"Adj R-squared = {stats['adj_r2']:>10.4f}")
     print("".ljust(52) + f"Root MSE      = {stats['root_mse']:>10.6f}")
-    print("".ljust(52) + f"Res. dev.     = {stats['res_dev']:>10.3f}")
 
     print("\n" + "-" * 78)
     print(
