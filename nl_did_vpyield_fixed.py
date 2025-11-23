@@ -623,14 +623,22 @@ def run_nl_regression(
             sse = float(np.sum(resid**2))
         iteration_history.append(sse)
 
-    lsq = least_squares(
-        model.residuals,
-        initial_guess,
+    lsq_kwargs = dict(
+        fun=model.residuals,
+        x0=initial_guess,
         bounds=(lower_bounds, upper_bounds),
         max_nfev=max_nl_steps,
-        verbose=0,
-        callback=_callback,
+        verbose=2 if verbose else 0,
     )
+
+    try:
+        lsq = least_squares(**lsq_kwargs, callback=_callback)
+    except TypeError as exc:
+        if "callback" not in str(exc):
+            raise
+        logging.info("SciPy least_squares callback unsupported; falling back without intermediate tracking.")
+        lsq = least_squares(**lsq_kwargs)
+        iteration_history.append(float(2 * lsq.cost))
     if not lsq.success:
         logging.warning("Least squares did not converge: %s", lsq.message)
 
